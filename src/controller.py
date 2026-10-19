@@ -14,6 +14,9 @@ Key rules:
   RESET.
 * An invalid reading puts the robot into FAULT. Leaving FAULT requires a
   number of consecutive valid readings and then an explicit RESET.
+* An optional Navigator only *requests* motion. Its request is clamped to the
+  motion limits and goes through exactly the same checks as manual driving.
+  Arrival or a blocked route ends the run with MOVING -> STOPPED.
 """
 
 from __future__ import annotations
@@ -34,6 +37,15 @@ from src.models import (
     SensorFaultMode,
     SensorReading,
     Verdict,
+)
+from src.navigation import (
+    MotionRequest,
+    Navigator,
+    OccupancyGrid,
+    PlanResult,
+    RouteStatus,
+    build_occupancy_grid,
+    plan_path,
 )
 from src.safety import assess_reading
 from src.sensors.base import DistanceSensor
@@ -84,6 +96,7 @@ class RobotController:
         self.last_reading: SensorReading | None = None
         self.last_assessment: SafetyAssessment | None = None
         self.active_fault: FaultInfo | None = None
+        self.navigator: Navigator | None = None
         self.recovery_valid_count = 0
         self._clear_while_latched_noted = False
 
@@ -175,7 +188,16 @@ class RobotController:
         """One simulation step: sense, decide, then (only if MOVING) act."""
         self._sense(count_for_recovery=True)
         if self.state is S.MOVING and self.last_assessment is not None and self.last_assessment.verdict is Verdict.CLEAR:
-            next_pose = self.sim.predict(self.speed_mps, math.radians(self.turn_rate_dps), self.config.motion.time_step_s)
+            request = self._motion_request()
+            if request.arrived:
+                self._transition(S.STOPPED, f"Destination reached: {self.navigator.label if self.navigator else ''}")
+                self.sim.advance_time(self.config.motion.time_step_s)
+                return
+            if request.blocked_reason is not None:
+                self._transition(S.STOPPED, f"Route blocked: {request.blocked_reason}")
+                self.sim.advance_time(self.config.motion.time_step_s)
+                return
+            next_pose = self.sim.predict(request.linear_mps, request.angular_rps, self.config.motion.time_step_s)
             hit = self.sim.collision_at(next_pose)
             if hit is not None:
                 self._enter_fault(
@@ -229,6 +251,7 @@ class RobotController:
             self.sim.set_world(old_world)
             raise ValueError(f"{hit} would overlap the robot's current position")
         self._log(Level.INFO, "CONFIG", f"Obstacles updated ({len(world.obstacles)} in room)")
+        self._replan_after_world_change()
         self.observe()
 
     def inject_sensor_fault(self, mode: SensorFaultMode) -> None:
@@ -251,6 +274,34 @@ class RobotController:
             return
         setter(noise_std_m)
         self._log(Level.INFO, "CONFIG", f"Simulated sensor noise set to {noise_std_m * 100:.1f} cm std dev")
+
+    # ---------------------------------------------------------------- navigation
+
+    def plan_route(self, goal: tuple[float, float], label: str) -> PlanResult:
+        """Plan from the robot's current position. Only allowed while IDLE.
+
+        A successful plan does NOT start motion: the user still has to press Start.
+        """
+        if self.state is not S.IDLE:
+            raise ValueError(f"Routes can only be planned while IDLE (now {self.state}). Press Reset first.")
+        result = plan_path(self.occupancy_grid(), (self.sim.pose.x, self.sim.pose.y), goal)
+        if result.ok:
+            self.navigator = Navigator(result, label, self.config.navigation)
+            self._log(Level.INFO, "NAV", f"Route to {label} ({goal[0]:.2f}, {goal[1]:.2f}) planned: "
+                                         f"{result.length_m:.2f} m, {len(result.waypoints)} waypoints. Press Start to drive.")
+        else:
+            self._log(Level.WARNING, "NAV", f"No route to {label} ({goal[0]}, {goal[1]}): {result.status}: {result.reason}")
+        return result
+
+    def clear_route(self) -> None:
+        if self.state is S.MOVING:
+            raise ValueError("Pause or stop the robot before clearing the route")
+        if self.navigator is not None:
+            self.navigator = None
+            self._log(Level.INFO, "NAV", "Route cleared: manual driving mode")
+
+    def occupancy_grid(self) -> OccupancyGrid:
+        return build_occupancy_grid(self.sim.world, self.config.robot.radius_m, self.config.navigation)
 
     # ------------------------------------------------------------------ queries
 
@@ -285,13 +336,44 @@ class RobotController:
 
     # ---------------------------------------------------------------- internals
 
+    def _motion_request(self) -> MotionRequest:
+        """Manual sliders, or the navigator's request, clamped to the motion limits."""
+        max_angular = math.radians(self.config.motion.max_turn_rate_dps)
+        if self.navigator is None:
+            return MotionRequest(self.speed_mps, math.radians(self.turn_rate_dps))
+        request = self.navigator.request(self.sim.pose, self.speed_mps, max_angular, self.config.motion.time_step_s)
+        if request.arrived or request.blocked_reason is not None:
+            return request
+        linear = request.linear_mps if math.isfinite(request.linear_mps) else 0.0
+        angular = request.angular_rps if math.isfinite(request.angular_rps) else 0.0
+        return MotionRequest(min(max(linear, 0.0), self.speed_mps), min(max(angular, -max_angular), max_angular))
+
+    def _replan_after_world_change(self) -> None:
+        nav = self.navigator
+        if nav is None or nav.status is not RouteStatus.ACTIVE:
+            return
+        result = plan_path(self.occupancy_grid(), (self.sim.pose.x, self.sim.pose.y), nav.goal)
+        if result.ok:
+            nav.replace_plan(result)
+            self._log(Level.INFO, "NAV", f"Obstacles changed: route to {nav.label} re-planned ({result.length_m:.2f} m)")
+        else:
+            nav.block(f"obstacles changed and no route to {nav.label} remains ({result.reason})")
+            self._log(Level.WARNING, "NAV", f"Route to {nav.label} blocked: {result.reason}")
+            if self.state is S.MOVING:
+                self._transition(S.STOPPED, f"Route blocked: {nav.blocked_reason}")
+
     def _begin_motion(self, command: Command) -> CommandResult:
         assessment = self._sense(count_for_recovery=False)
         if self.state is S.FAULT:
             return self._reject(command, f"Sensor fault: {assessment.reason}")
         if assessment.verdict is not Verdict.CLEAR:
             return self._reject(command, f"Path not clear: {assessment.reason}")
-        next_pose = self.sim.predict(self.speed_mps, math.radians(self.turn_rate_dps), self.config.motion.time_step_s)
+        request = self._motion_request()
+        if request.arrived:
+            return self._reject(command, "Already at the destination: plan a new route or clear navigation")
+        if request.blocked_reason is not None:
+            return self._reject(command, f"Route blocked: {request.blocked_reason}. Plan a new route or clear navigation")
+        next_pose = self.sim.predict(request.linear_mps, request.angular_rps, self.config.motion.time_step_s)
         hit = self.sim.collision_at(next_pose)
         if hit is not None:
             return self._reject(command, f"First step would hit {hit}")

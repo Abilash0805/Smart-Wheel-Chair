@@ -109,6 +109,46 @@ class SafetyConfig:
 
 
 @dataclass(frozen=True)
+class NavigationConfig:
+    """Grid path planning and route following (simulation only)."""
+
+    # Size of one occupancy-grid cell. The room size must be a whole number of cells.
+    resolution_m: float = 0.05
+    # Extra clearance added to the robot radius when inflating obstacles and walls.
+    # Must be at least half a cell diagonal (resolution * sqrt(2) / 2) so that the
+    # straight segments between free cell centres keep the robot body clear.
+    safety_margin_m: float = 0.05
+    # A waypoint (and the goal) counts as reached within this distance.
+    waypoint_tolerance_m: float = 0.04
+    # If the heading error is larger than this, the robot turns on the spot first.
+    rotate_in_place_deg: float = 20.0
+    # Turn rate per radian of heading error (1/s).
+    heading_gain: float = 2.0
+    # Planner preference for keeping away from obstacles: cells with less than
+    # preferred_clearance_m to the nearest surface cost up to (1 + clearance_weight)
+    # times more. 0 disables it (pure shortest path).
+    preferred_clearance_m: float = 0.5
+    clearance_weight: float = 2.0
+
+    def __post_init__(self) -> None:
+        for name in ("resolution_m", "safety_margin_m", "waypoint_tolerance_m", "rotate_in_place_deg", "heading_gain",
+                     "preferred_clearance_m", "clearance_weight"):
+            _require_finite(getattr(self, name), name)
+        if self.resolution_m <= 0:
+            raise ValueError("resolution_m must be > 0")
+        if self.safety_margin_m < self.resolution_m * math.sqrt(2) / 2:
+            raise ValueError("safety_margin_m must be at least half a grid-cell diagonal")
+        if self.waypoint_tolerance_m <= 0:
+            raise ValueError("waypoint_tolerance_m must be > 0")
+        if not 0 < self.rotate_in_place_deg < 180:
+            raise ValueError("rotate_in_place_deg must be between 0 and 180")
+        if self.heading_gain <= 0:
+            raise ValueError("heading_gain must be > 0")
+        if self.preferred_clearance_m <= 0 or self.clearance_weight < 0:
+            raise ValueError("preferred_clearance_m must be > 0 and clearance_weight >= 0")
+
+
+@dataclass(frozen=True)
 class SimulationConfig:
     """All configuration in one place, with cross-field validation."""
 
@@ -116,6 +156,7 @@ class SimulationConfig:
     robot: RobotConfig = field(default_factory=RobotConfig)
     motion: MotionConfig = field(default_factory=MotionConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    navigation: NavigationConfig = field(default_factory=NavigationConfig)
 
     def __post_init__(self) -> None:
         validate_threshold(self.safety.stop_threshold_m, self.sensor)

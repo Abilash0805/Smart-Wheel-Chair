@@ -70,6 +70,16 @@ SCENARIOS: dict[str, Scenario] = {
 
 DEFAULT_SCENARIO = "obstacle_ahead"
 
+# Predefined destinations in the simulated room (metres). The labels are just
+# names for demo positions; they are reachable in every scenario above
+# (checked by tests/test_navigation.py).
+DESTINATIONS: dict[str, tuple[float, float]] = {
+    "Kitchen": (3.3, 2.3),
+    "Living Room": (3.3, 0.7),
+    "Bedroom": (1.0, 0.7),
+    "Expo Goal": (2.0, 2.0),
+}
+
 
 def build_controller(
     scenario_key: str = DEFAULT_SCENARIO,
