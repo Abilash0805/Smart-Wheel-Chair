@@ -86,3 +86,17 @@ def test_no_hardware_libraries_are_imported():
 def test_core_does_not_depend_on_streamlit():
     for path in ROOT.joinpath("src").rglob("*.py"):
         assert "streamlit" not in _imports(path), path.name
+
+
+@pytest.mark.parametrize("key", ["obstacle_ahead", "wall_approach"])
+@pytest.mark.parametrize("turn_dps", [-45.0, -20.0, 10.0, 30.0])
+def test_turning_runs_always_stop_without_collision(key, turn_dps):
+    c = build_controller(key, clock=fixed_clock)
+    c.set_motion(0.2, turn_dps)
+    assert c.start().accepted
+    for _ in range(3000):
+        if c.state is not RobotState.MOVING:
+            break
+        c.tick()
+        assert c.sim.collision_at(c.sim.pose) is None
+    assert c.state in (RobotState.OBSTACLE_DETECTED, RobotState.FAULT)

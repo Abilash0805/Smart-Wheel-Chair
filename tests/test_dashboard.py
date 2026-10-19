@@ -85,3 +85,35 @@ def test_scenario_reload_resets_settings(app):
     button(app, "🔄 Load").click().run()
     assert app.session_state.controller.stop_threshold_m == 0.5
     assert app.session_state.threshold == 0.5
+
+
+def enable_auto_run(at):
+    at.sidebar.toggle(key="auto_run").set_value(True).run()
+
+
+def test_auto_run_advances_time_but_never_starts_motion(app):
+    enable_auto_run(app)
+    for _ in range(5):
+        app.session_state.last_auto_tick = 0.0  # pretend the refresh interval has elapsed
+        app.run()
+    controller = app.session_state.controller
+    assert controller.sim.step_count > 0  # auto-run really ticked
+    assert state(app) is RobotState.IDLE
+    assert controller.sim.distance_travelled_m == 0.0
+
+
+def test_auto_run_never_releases_obstacle_latch(app):
+    button(app, "▶ Start").click().run()
+    enable_auto_run(app)
+    for _ in range(40):
+        app.session_state.last_auto_tick = 0.0
+        app.run()
+        if state(app) is not RobotState.MOVING:
+            break
+    assert state(app) is RobotState.OBSTACLE_DETECTED
+    pose = app.session_state.controller.sim.pose
+    for _ in range(10):
+        app.session_state.last_auto_tick = 0.0
+        app.run()
+    assert state(app) is RobotState.OBSTACLE_DETECTED
+    assert app.session_state.controller.sim.pose == pose

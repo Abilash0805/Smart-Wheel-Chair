@@ -110,7 +110,9 @@ Key decisions:
   angled surfaces. Real ultrasonic sensors miss things this model sees, and vice versa. Very thin
   objects can fall between rays.
 - One forward-facing sensor can't see obstacles to the side or behind (Scenario 3 shows this).
-- Simple stop rule: the robot can end up to one step (speed × 0.1 s = 2 cm at default speed) inside the threshold.
+- Simple stop rule: driving straight, the robot can end up to one step (speed × 0.1 s = 2 cm at default speed)
+  inside the threshold. While turning, the beam sweeps onto new surfaces, so it can end slightly further
+  inside (2.3 cm was observed in testing). Tests check that it never collides, not an exact margin.
   Real robots also have sensor latency, braking distance and wheel slip. None of these are modelled.
 - Position is known perfectly in simulation. A real robot needs localisation (encoders, IMU, etc.).
 - A sensor that is "stuck" at a plausible value would not be detected by range checks alone.
@@ -118,13 +120,13 @@ Key decisions:
 
 ## Project status
 
-**Completed (verified by tests, 246 passing at the time of writing):**
+**Completed (verified by tests, 256 passing at the time of writing):**
 - [x] Project structure, config validation, deterministic simulator (motion, ray casting, collisions)
 - [x] Simulated ultrasonic sensor with range limits, seeded noise, 6 fault-injection modes
 - [x] Safety assessment: threshold boundary, every invalid-value class
 - [x] State machine with 7 states, enforced transition table, latched obstacle stop, e-stop, fault recovery
 - [x] Streamlit dashboard: room map, controls, threshold, obstacle editor, fault injection, log, summary, scenarios
-- [x] Dashboard smoke tests (Streamlit AppTest), plus a check that no hardware imports exist
+- [x] Dashboard smoke tests (Streamlit AppTest), including auto-run never starting motion, plus a check that no hardware imports exist
 - [x] GitHub Actions workflow running tests on Ubuntu and Windows (Python 3.12)
 
 **Not started (later stages):** hardware validation (Stage 2), hardware sensor/motor backends
