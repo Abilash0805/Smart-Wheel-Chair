@@ -8,11 +8,16 @@ a live dashboard, and some sensing experiments.
 > Everything in this repository is currently **simulation only**. Simulated results
 > do not prove real-world safety.
 
-## Current stage: Stage 1, working simulation ✅
+## Current stage: Stage 1 simulation ✅ + simulated navigation (Stage 4 work, simulation only) ✅
 
 A deterministic 2-D simulator, a simulated HC-SR04-style ultrasonic sensor, a safety
-state machine, a Streamlit dashboard, and automated tests. **There is no hardware
-integration of any kind** (a test fails if GPIO/serial libraries are imported).
+state machine, A* route planning on an occupancy grid, a Streamlit dashboard, and automated
+tests. **There is no hardware integration of any kind** (a test fails if GPIO/serial
+libraries are imported).
+
+Navigation was done in simulation before hardware validation (Stage 2) on purpose. It needs
+no hardware and doesn't change the safety rules. Stage 2 is still blocked on hardware
+information.
 
 ## Setup (Windows, Python 3.12)
 
@@ -41,6 +46,7 @@ Everything else is the Python standard library. Streamlit brings its own depende
 |---|---|
 | Dashboard | `.\.venv\Scripts\python.exe -m streamlit run app.py` → opens http://localhost:8501 |
 | All tests | `.\.venv\Scripts\python.exe -m pytest -q` |
+| Navigation tests only | `.\.venv\Scripts\python.exe -m pytest -q tests/test_navigation.py` |
 | Headless check (no browser) | `.\.venv\Scripts\python.exe headless_demo.py` |
 
 To stop the dashboard, press `Ctrl+C` in the terminal.
@@ -61,7 +67,11 @@ To stop the dashboard, press `Ctrl+C` in the terminal.
 | Sensor fault injection (sidebar) | No echo, NaN, infinity, negative, above max, below min. |
 | Noise (sidebar) | Seeded Gaussian noise. 0 by default, so runs are repeatable. |
 | Load / reset scenario (sidebar) | Restores room, robot and all settings. Refused while moving, in e-stop or in fault. |
-| ✏️ Edit obstacles | Table of rectangles (metres). You can add or move boxes, even while moving. |
+| Destination (sidebar) | Kitchen, Living Room, Bedroom, Expo Goal, or **Custom goal** (x, y in metres). |
+| **🧭 Plan route** (sidebar) | A* route from the robot's position. Only while IDLE. **Does not start motion.** Press Start to drive it. |
+| **✖ Clear route** (sidebar) | Back to manual straight driving. Not allowed while moving. |
+| Show planning grid (sidebar) | Grey band = cells where the robot *centre* may not go (robot radius + 5 cm margin). |
+| ✏️ Edit obstacles | Table of rectangles (metres). You can add or move boxes, even while moving. If a route is active it is re-planned, or the robot stops if no route remains. |
 | Event log | Timestamped log (wall clock + sim time) with CSV download. |
 
 ### Suggested expo demo script
@@ -70,6 +80,10 @@ To stop the dashboard, press `Ctrl+C` in the terminal.
 3. **Emergency stop.** While moving, press 🛑. Try Start: it's rejected (see "Last action REJECTED"). Reset → IDLE.
 4. **Sensor fault.** Inject "NaN" → ✖ FAULT. Reset is refused. Set fault to "No fault", let it run 3 steps, then Reset.
 5. **Honest limitation.** Scenario 3 (blind spot). One narrow beam misses the post, and the simulator blocks the collision with a FAULT.
+6. **Navigation.** Load scenario 1, pick "Kitchen", Plan route (purple line with S and G), Start, Auto-run.
+   Press 🛑 mid-route: the robot stops and stays stopped. Reset, then Start continues to the Kitchen.
+7. **Re-planning.** While driving to the Kitchen, add a box on the purple line in the obstacle editor.
+   The route is re-planned around it.
 
 ## Architecture
 
@@ -85,7 +99,8 @@ src/
   safety.py                 CLEAR / OBSTACLE / INVALID decision for one reading
   controller.py             State machine + interlocks (the ONLY place state changes)
   event_log.py              Bounded, timestamped log with CSV export
-  scenarios.py              Resettable demo scenarios
+  navigation.py             Occupancy grid, A* planner, route follower (requests motion only)
+  scenarios.py              Resettable demo scenarios + predefined destinations
   visualization.py          Pure SVG renderer of the room
 tests/                      pytest tests (fake sensors via dependency injection)
 docs/STATE_MACHINE.md       Every permitted state transition
@@ -100,8 +115,40 @@ Key decisions:
 - **Streamlit safety.** All state lives in one controller in `st.session_state`. Commands come
   only from button callbacks, so page reruns can't restart motion or clear latches.
   Auto-run uses Streamlit's built-in `st.fragment(run_every=...)`, so there's no extra dependency.
-- **No navigation module yet.** Path planning is Stage 4, so there are no empty placeholder files.
-  Wall and obstacle collision prevention is in the simulator.
+- **Wall and obstacle collision prevention lives in the simulator**, and navigation reuses the same test.
+
+## Navigation (simulation only)
+
+**Occupancy grid** (`build_occupancy_grid`). The 4 m × 3 m room becomes 80 × 60 cells of 0.05 m
+(`NavigationConfig.resolution_m`), using the same coordinates as the simulator: origin bottom-left,
+x east, y north. A cell is **blocked** if a circle of radius *robot radius + safety margin*
+(0.15 + 0.05 = 0.20 m) at the cell centre would overlap a wall or obstacle. The grid calls the
+simulator's own collision function, so the two can't disagree.
+
+**A\* planner** (`plan_path`):
+- 8-connected moves and an octile heuristic.
+- Diagonal moves can't cut the corner of a blocked cell.
+- Ties are broken deterministically, so the same input always gives the same route.
+- A clearance cost makes cells close to obstacles more expensive, so routes keep away from
+  surfaces where there is room.
+- Results are explicit: `OK`, `INVALID_START` (robot inside a no-go zone), `INVALID_GOAL`
+  (outside the room, not a number, inside an obstacle, or too close to a wall or obstacle), or
+  `UNREACHABLE` (cut off, or every gap is narrower than the inflated footprint).
+- The waypoints are the cell centres where the route changes direction, ending exactly at the goal.
+
+Why the margin must be at least half a cell diagonal (validated in config): every straight segment
+between free cell centres then stays at least the robot radius away from every surface.
+
+**Following a route.** The `Navigator` turns toward the next waypoint, on the spot if the heading
+error is over 20°, then drives at up to the speed-slider value. It only **requests** motion:
+- The controller clamps the request to the speed and turn limits.
+- Every step still goes through the usual checks: sensor reading → obstacle latch → Emergency
+  Stop / FAULT → collision check.
+- Reaching the goal, or the route becoming blocked, ends the run with the existing
+  `MOVING → STOPPED` transition. No new states or transitions were added.
+- Planning never starts motion.
+- If obstacles change, the route is re-planned from the current position. If no route remains,
+  the robot stops.
 
 ## Known limitations (be honest at the expo!)
 - All numbers are simulation defaults. The HC-SR04 range (2 cm–4 m) and 15° beam are *commonly
@@ -116,11 +163,25 @@ Key decisions:
   Real robots also have sensor latency, braking distance and wheel slip. None of these are modelled.
 - Position is known perfectly in simulation. A real robot needs localisation (encoders, IMU, etc.).
 - A sensor that is "stuck" at a plausible value would not be detected by range checks alone.
+- **Navigation limits:**
+  - Routes are planned on a perfectly known, static, simulated map with perfect position. A route
+    being "collision-free on the grid" does **not** mean a real robot would drive it without hitting
+    anything. That would need real localisation (wheel encoders, IMU and/or markers), a
+    calibrated map, and far better obstacle sensing than one forward ultrasonic sensor.
+  - The robot follows the route approximately (it curves slightly when correcting heading). The
+    simulator's collision check still guards every step, and tests confirm the demo routes never collide.
+  - Routes look stair-stepped (45° and 90° moves only), and the planner doesn't consider which way
+    the robot ends up facing.
+  - The forward-sensor stop rule still applies during navigation. A goal close to a wall can end in
+    a (correct, safe) obstacle stop before arrival. Example: (3.5, 1.5) is a valid goal, but driving
+    straight at it puts the wall within 0.5 m first. That stop is latched; if the robot is left facing
+    the obstacle, Resume stays blocked until the scenario is reset.
+  - The four destinations are named demo positions. They aren't text or voice commands yet (Stage 6).
 - The software e-stop isn't a physical safety device. Real tests need an independent hardware cut-off.
 
 ## Project status
 
-**Completed (verified by tests, 256 passing at the time of writing):**
+**Completed (verified by tests, 339 passing at the time of writing):**
 - [x] Project structure, config validation, deterministic simulator (motion, ray casting, collisions)
 - [x] Simulated ultrasonic sensor with range limits, seeded noise, 6 fault-injection modes
 - [x] Safety assessment: threshold boundary, every invalid-value class
@@ -128,9 +189,13 @@ Key decisions:
 - [x] Streamlit dashboard: room map, controls, threshold, obstacle editor, fault injection, log, summary, scenarios
 - [x] Dashboard smoke tests (Streamlit AppTest), including auto-run never starting motion, plus a check that no hardware imports exist
 - [x] GitHub Actions workflow running tests on Ubuntu and Windows (Python 3.12)
+- [x] Simulated navigation: occupancy grid with inflation, A* with invalid/unreachable handling,
+      route following through the controller, re-planning on obstacle changes, dashboard route display,
+      predefined and custom goals (tests in `tests/test_navigation.py` and `tests/test_dashboard.py`)
 
 **Not started (later stages):** hardware validation (Stage 2), hardware sensor/motor backends
-(Stage 3), A* navigation (Stage 4), ESP32 CSI research (Stage 5), destination commands (Stage 6).
+(Stage 3), real-world localisation for navigation (Stage 4, hardware part), ESP32 CSI research
+(Stage 5), text/voice destination commands (Stage 6).
 
 **Blocked:** Stage 2 needs real hardware information from you (see below).
 

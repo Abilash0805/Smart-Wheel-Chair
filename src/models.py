@@ -159,7 +159,8 @@ STATE_INFO: dict[RobotState, StateInfo] = {
     ),
     RobotState.STOPPED: StateInfo(
         "■", "STOPPED",
-        "Run ended by the Stop command. Press Reset to return to IDLE before starting again.",
+        "Run ended: Stop command, destination reached, or route blocked. "
+        "Press Reset to return to IDLE before starting again.",
     ),
     RobotState.EMERGENCY_STOP: StateInfo(
         "⛔", "EMERGENCY STOP",

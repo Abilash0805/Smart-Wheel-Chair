@@ -12,6 +12,7 @@ from html import escape
 
 from src.controller import RobotController
 from src.models import STATE_INFO, RobotState, Verdict
+from src.navigation import OccupancyGrid, RouteStatus
 
 SCALE = 140  # pixels per metre
 MARGIN = 36
@@ -23,7 +24,7 @@ BEAM_STYLE = {
 }
 
 
-def render_room_svg(controller: RobotController) -> str:
+def render_room_svg(controller: RobotController, show_grid: bool = True) -> str:
     sim = controller.sim
     world = sim.world
     width_px = world.width_m * SCALE + 2 * MARGIN
@@ -99,6 +100,35 @@ def render_room_svg(controller: RobotController) -> str:
             f'text-anchor="middle" fill="#111827">{escape(o.name)}</text>'
         )
 
+    # Planning grid: cells where the robot centre may not go (inflated walls/obstacles).
+    if show_grid:
+        add(_grid_svg(controller.occupancy_grid(), sx, sy))
+
+    # Planned route with start and goal markers.
+    nav = controller.navigator
+    if nav is not None:
+        blocked = nav.status is RouteStatus.BLOCKED
+        points = (nav.plan.start, *nav.plan.waypoints)
+        route = " ".join(f"{sx(x):.1f},{sy(y):.1f}" for x, y in points)
+        dash = ' stroke-dasharray="10 6"' if blocked else ""
+        colour = "#6b7280" if blocked else "#7c3aed"
+        add(f'<polyline points="{route}" fill="none" stroke="{colour}" stroke-width="3.5" '
+            f'stroke-linejoin="round"{dash}><title>Planned route</title></polyline>')
+        for x, y in nav.plan.waypoints[:-1]:
+            add(f'<circle cx="{sx(x):.1f}" cy="{sy(y):.1f}" r="3" fill="{colour}"/>')
+        (stx, sty), (gx, gy) = nav.plan.start, nav.plan.goal
+        add(f'<rect x="{sx(stx) - 8:.1f}" y="{sy(sty) - 8:.1f}" width="16" height="16" fill="#ffffff" '
+            f'stroke="{colour}" stroke-width="2.5"><title>Route start</title></rect>')
+        add(f'<text x="{sx(stx):.1f}" y="{sy(sty) + 4:.1f}" font-size="11" font-weight="bold" '
+            f'text-anchor="middle" fill="{colour}">S</text>')
+        add(f'<circle cx="{sx(gx):.1f}" cy="{sy(gy):.1f}" r="11" fill="#ffffff" stroke="{colour}" stroke-width="3">'
+            f'<title>Destination: {escape(nav.label)}</title></circle>')
+        add(f'<text x="{sx(gx):.1f}" y="{sy(gy) + 4:.1f}" font-size="12" font-weight="bold" '
+            f'text-anchor="middle" fill="{colour}">G</text>')
+        tag = f"GOAL: {nav.label}" + (" (ROUTE BLOCKED)" if blocked else "")
+        add(f'<text x="{sx(gx):.1f}" y="{sy(gy) - 16:.1f}" font-size="12" font-weight="bold" text-anchor="middle" '
+            f'fill="{colour}" stroke="#ffffff" stroke-width="3" paint-order="stroke">{escape(tag)}</text>')
+
     # Trail.
     if len(sim.trail) > 1:
         points = " ".join(f"{sx(x):.1f},{sy(y):.1f}" for x, y in sim.trail)
@@ -165,3 +195,23 @@ def render_room_svg(controller: RobotController) -> str:
         )
     add("</svg>")
     return "".join(parts)
+
+
+def _grid_svg(grid: OccupancyGrid, sx, sy) -> str:
+    """Blocked-but-not-occupied cells as merged horizontal runs (keeps the SVG small)."""
+    res = grid.resolution_m
+    rects = []
+    for row in range(grid.rows):
+        col = 0
+        while col < grid.cols:
+            if (col, row) in grid.blocked and (col, row) not in grid.occupied:
+                start = col
+                while col < grid.cols and (col, row) in grid.blocked and (col, row) not in grid.occupied:
+                    col += 1
+                x0, x1, y1 = start * res, col * res, (row + 1) * res
+                rects.append(f'<rect x="{sx(x0):.1f}" y="{sy(y1):.1f}" width="{(x1 - x0) * SCALE:.1f}" '
+                             f'height="{res * SCALE:.1f}"/>')
+            else:
+                col += 1
+    return ('<g fill="#94a3b8" fill-opacity="0.28"><title>No-go zone for the robot centre '
+            f'(robot radius + safety margin = {grid.inflation_radius_m:.2f} m)</title>' + "".join(rects) + "</g>")

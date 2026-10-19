@@ -117,3 +117,53 @@ def test_auto_run_never_releases_obstacle_latch(app):
         app.run()
     assert state(app) is RobotState.OBSTACLE_DETECTED
     assert app.session_state.controller.sim.pose == pose
+
+
+def plan(at, destination, x=None, y=None):
+    at.sidebar.selectbox(key="destination").set_value(destination).run()
+    if x is not None:
+        at.sidebar.number_input(key="custom_x").set_value(x).run()
+        at.sidebar.number_input(key="custom_y").set_value(y).run()
+    button(at, "🧭 Plan route").click().run()
+
+
+def test_plan_predefined_route_shows_on_map_without_moving(app):
+    plan(app, "Kitchen")
+    c = app.session_state.controller
+    assert c.navigator is not None and c.navigator.label == "Kitchen"
+    assert state(app) is RobotState.IDLE
+    svg = next(m.value for m in app.markdown if m.value.startswith("<svg"))
+    assert "GOAL: Kitchen" in svg and "Planned route" in svg and "No-go zone" in svg
+    for _ in range(3):
+        app.run()
+    assert c.sim.distance_travelled_m == 0.0
+
+
+def test_dashboard_drives_route_to_destination(app):
+    plan(app, "Bedroom")
+    button(app, "▶ Start").click().run()
+    for _ in range(10):
+        button(app, "Step ×10").click().run()
+        if state(app) is not RobotState.MOVING:
+            break
+    assert state(app) is RobotState.STOPPED
+    assert "Destination reached: Bedroom" in app.session_state.controller.state_reason
+
+
+def test_invalid_custom_goal_is_reported(app):
+    plan(app, "Custom goal", 2.8, 1.5)  # inside Box A
+    assert app.session_state.controller.navigator is None
+    assert any("No route" in w.value for w in app.warning)
+
+
+def test_valid_custom_goal(app):
+    plan(app, "Custom goal", 1.5, 0.6)
+    assert app.session_state.controller.navigator.goal == (1.5, 0.6)
+
+
+def test_planning_refused_while_moving(app):
+    button(app, "▶ Start").click().run()
+    plan(app, "Kitchen")
+    assert app.session_state.controller.navigator is None
+    assert state(app) is RobotState.MOVING
+    assert any("Route not planned" in w.value for w in app.warning)

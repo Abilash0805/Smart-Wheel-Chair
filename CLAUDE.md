@@ -21,9 +21,10 @@ It must never carry a person. The current stage is **Stage 1: software-only simu
 - EMERGENCY_STOP is accepted in every state and blocks movement until RESET. RESET never starts motion.
 - Fault recovery needs N consecutive valid readings and then RESET. E-stop + reset can't bypass it.
 - Dashboard: robot commands only come from button callbacks. Reruns and auto-run (`tick()`) must never start motion or clear latches.
+- Navigation only *requests* motion (`Navigator.request`). The controller clamps it and applies every safety check. Planning never starts motion, and navigation never changes state directly. Routes are simulation-only: never claim they are collision-free in the real world.
 
 ## Layout
-- `src/` is pure Python with no Streamlit. `config.py`, `models.py`, `simulator.py`, `sensors/`, `safety.py`, `controller.py`, `event_log.py`, `scenarios.py`, `visualization.py`.
+- `src/` is pure Python with no Streamlit. `config.py`, `models.py`, `simulator.py`, `sensors/`, `safety.py`, `controller.py`, `navigation.py`, `event_log.py`, `scenarios.py`, `visualization.py`.
 - `app.py` is the Streamlit dashboard (presentation only).
 - `tests/` holds pytest tests. `tests/helpers.py` has the fake sensor and builders.
 

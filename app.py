@@ -29,7 +29,8 @@ from src.models import (
     SensorFaultMode,
     Verdict,
 )
-from src.scenarios import DEFAULT_SCENARIO, SCENARIOS, build_controller
+from src.navigation import RouteStatus
+from src.scenarios import DEFAULT_SCENARIO, DESTINATIONS, SCENARIOS, build_controller
 from src.visualization import render_room_svg
 
 AUTO_RUN_INTERVAL_S = 0.5
@@ -43,6 +44,7 @@ VERDICT_LABEL = {
 }
 LEVEL_LABEL = {Level.INFO: "ℹ INFO", Level.WARNING: "⚠ WARNING", Level.CRITICAL: "⛔ CRITICAL"}
 OBSTACLE_COLUMNS = ["name", "x", "y", "width", "height"]
+CUSTOM_GOAL = "Custom goal"
 
 ss = st.session_state
 
@@ -64,6 +66,9 @@ def load_scenario(key: str) -> None:
     ss.noise_cm = defaults.sensor.noise_std_m * 100
     ss.fault_mode = SensorFaultMode.NONE.value
     ss.auto_run = False
+    ss.destination = next(iter(DESTINATIONS))
+    ss.custom_x, ss.custom_y = 2.0, 1.0
+    ss.show_grid = True
     ss.obstacle_base = obstacles_to_df(ss.controller.sim.world.obstacles)
     ss.editor_version = ss.get("editor_version", 0) + 1
     ss.flash = ("info", f"Loaded scenario: {SCENARIOS[key].title}. Robot is IDLE.")
@@ -131,6 +136,31 @@ def on_auto_run() -> None:
     ss.last_auto_tick = 0.0
 
 
+def on_plan_route() -> None:
+    if ss.destination == CUSTOM_GOAL:
+        goal, label = (float(ss.custom_x), float(ss.custom_y)), f"Custom ({ss.custom_x:.2f}, {ss.custom_y:.2f})"
+    else:
+        goal, label = DESTINATIONS[ss.destination], ss.destination
+    try:
+        result = ctrl().plan_route(goal, label)
+    except ValueError as exc:
+        ss.flash = ("warning", f"Route not planned: {exc}")
+        return
+    if result.ok:
+        ss.flash = ("success", f"Route to {label} planned ({result.length_m:.2f} m). "
+                               "The robot will NOT move until you press Start.")
+    else:
+        ss.flash = ("warning", f"No route to {label}: {result.reason}")
+
+
+def on_clear_route() -> None:
+    try:
+        ctrl().clear_route()
+        ss.flash = ("info", "Route cleared. Start now drives straight using the speed and turn sliders.")
+    except ValueError as exc:
+        ss.flash = ("warning", f"Route not cleared: {exc}")
+
+
 # ------------------------------------------------------------------- layout
 
 def render_header() -> None:
@@ -159,6 +189,23 @@ def render_sidebar() -> None:
     motion = ctrl().config.motion
     sb.slider("Speed (m/s)", 0.05, motion.max_speed_mps, step=0.05, key="speed", on_change=on_motion)
     sb.slider("Turn rate (deg/s, + = left)", -45.0, 45.0, step=5.0, key="turn_rate", on_change=on_motion)
+
+    sb.header("Navigation (simulated)")
+    sb.selectbox("Destination", options=[*DESTINATIONS, CUSTOM_GOAL], key="destination")
+    if ss.destination == CUSTOM_GOAL:
+        world = ctrl().sim.world
+        cx, cy = sb.columns(2)
+        cx.number_input("x (m)", 0.0, world.width_m, step=0.05, format="%.2f", key="custom_x")
+        cy.number_input("y (m)", 0.0, world.height_m, step=0.05, format="%.2f", key="custom_y")
+    else:
+        gx, gy = DESTINATIONS[ss.destination]
+        sb.caption(f"{ss.destination} is at ({gx:.2f}, {gy:.2f}) m in the simulated room.")
+    plan_col, clear_col = sb.columns(2)
+    plan_col.button("🧭 Plan route", on_click=on_plan_route, width="stretch",
+                    help="Plans from the robot's current position. Only while IDLE. Does not start motion.")
+    clear_col.button("✖ Clear route", on_click=on_clear_route, width="stretch",
+                     help="Back to manual straight-line driving. Not allowed while moving.")
+    sb.toggle("Show planning grid (no-go zones)", key="show_grid")
 
     sb.header("Safety")
     sb.slider("Stop threshold (m)", 0.10, 1.50, step=0.05, key="threshold", on_change=on_threshold,
@@ -231,12 +278,38 @@ def render_sensor_panel(c: RobotController) -> None:
                     text=f"Recovery: {c.recovery_valid_count}/{needed} consecutive valid readings"
                          + (" - Reset permitted" if c.fault_recovery_ready else ""))
 
+    render_navigation_panel(c)
+
     pose = c.sim.pose
     st.subheader("Robot pose")
     st.markdown(
         f"x = **{pose.x:.2f} m**, y = **{pose.y:.2f} m**, heading = **{pose.heading_deg:.0f}°**  \n"
         f"Speed setting {c.speed_mps:.2f} m/s, turn {c.turn_rate_dps:+.0f}°/s"
     )
+
+
+def render_navigation_panel(c: RobotController) -> None:
+    st.subheader("Navigation")
+    nav = c.navigator
+    if nav is None:
+        st.markdown("**Mode:** manual - Start drives straight using the speed and turn sliders.")
+        return
+    status = {
+        RouteStatus.ACTIVE: "▶ following route",
+        RouteStatus.ARRIVED: "✔ destination reached",
+        RouteStatus.BLOCKED: "✖ ROUTE BLOCKED - plan a new route",
+    }[nav.status]
+    gx, gy = nav.goal
+    st.markdown(
+        f"**Mode:** route to **{nav.label}** ({gx:.2f}, {gy:.2f}) m  \n"
+        f"**Route status:** {status}  \n"
+        f"Planned length {nav.plan.length_m:.2f} m · waypoints left {len(nav.remaining_waypoints)} · "
+        f"grid {c.config.navigation.resolution_m:g} m cells"
+    )
+    if nav.blocked_reason:
+        st.caption(nav.blocked_reason)
+    st.caption("Navigation only requests motion. Obstacle stops, Emergency Stop and FAULT still apply. "
+               "The turn-rate slider is ignored while following a route; the speed slider is the maximum.")
 
 
 def render_summary(c: RobotController) -> None:
@@ -285,11 +358,12 @@ def live_panel() -> None:
     render_controls(c)
     map_col, info_col = st.columns([3, 2], gap="large")
     with map_col:
-        st.markdown(render_room_svg(c), unsafe_allow_html=True)
+        st.markdown(render_room_svg(c, show_grid=ss.get("show_grid", True)), unsafe_allow_html=True)
         st.caption(
-            "Legend: hatched boxes = obstacles · yellow circle + arrow = robot and heading · "
-            "shaded wedge = simulated ultrasonic beam (dashed grey when the reading is invalid) · "
-            "red dashed arc = stop threshold · dotted line = path travelled."
+            "Legend: hatched boxes = obstacles · grey band = no-go zone for the robot centre (planning grid) · "
+            "purple line with S / G = planned route, start and goal (dashed grey if blocked) · "
+            "yellow circle + arrow = robot and heading · shaded wedge = simulated ultrasonic beam "
+            "(dashed grey when the reading is invalid) · red dashed arc = stop threshold · dotted line = path travelled."
         )
     with info_col:
         render_sensor_panel(c)

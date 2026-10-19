@@ -27,6 +27,7 @@ state pairs.
 | IDLE | FAULT | Invalid reading | automatic |
 | MOVING | PAUSED | Pause | always |
 | MOVING | STOPPED | Stop | always |
+| MOVING | STOPPED | Navigation: destination reached, or route blocked | automatic (navigation only *requests* this end of run) |
 | MOVING | OBSTACLE_DETECTED | Reading ≤ threshold | automatic |
 | MOVING | EMERGENCY_STOP | Emergency Stop | always |
 | MOVING | FAULT | Invalid reading, or next step would collide | automatic |
@@ -47,6 +48,9 @@ state pairs.
 
 Everything else is rejected and logged as a `WARNING`. In particular:
 
+* Navigation (`src/navigation.py`) adds **no** states or transitions. It only supplies the motion
+  command for a `MOVING` step. The controller clamps it and runs all the usual checks first.
+  Planning a route never changes state.
 * Only **Start** and **Resume** can lead to `MOVING`. Ticks, resets, clearing an
   obstacle, auto-run, changing settings and dashboard reruns cannot.
 * **Reset** always ends in `IDLE` or `FAULT`, never in `MOVING`.
