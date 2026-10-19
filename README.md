@@ -22,10 +22,13 @@ Run these in **PowerShell** in the folder where you want the project:
 git clone https://github.com/Abilash0805/Smart-Wheel-Chair.git
 cd Smart-Wheel-Chair
 git checkout claude/dazzling-clarke-7bvux9
-py -3.12 -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
+python --version                 # must print Python 3.12.x
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
+If `python --version` doesn't show 3.12, try `py -3.12 -m venv .venv` instead. If neither works,
+install Python 3.12 from python.org with **"Add python.exe to PATH"** ticked, then reopen PowerShell.
 (On macOS/Linux, use `python3.12 -m venv .venv` and `.venv/bin/python` instead.)
 
 Dependencies are deliberately minimal: **streamlit** (dashboard) and **pytest** (tests).
@@ -36,9 +39,9 @@ Everything else is the Python standard library. Streamlit brings its own depende
 
 | What | Command (PowerShell, from the project folder) |
 |---|---|
-| Dashboard | `.venv\Scripts\python -m streamlit run app.py` → opens http://localhost:8501 |
-| All tests | `.venv\Scripts\python -m pytest -q` |
-| Headless check (no browser) | `.venv\Scripts\python headless_demo.py` |
+| Dashboard | `.\.venv\Scripts\python.exe -m streamlit run app.py` → opens http://localhost:8501 |
+| All tests | `.\.venv\Scripts\python.exe -m pytest -q` |
+| Headless check (no browser) | `.\.venv\Scripts\python.exe headless_demo.py` |
 
 To stop the dashboard, press `Ctrl+C` in the terminal.
 
