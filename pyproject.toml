@@ -1,0 +1,10 @@
+[project]
+name = "mobilitybot"
+version = "0.1.0"
+description = "MobilityBot Stage 1: software-only autonomous mobility simulator for a school expo"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
