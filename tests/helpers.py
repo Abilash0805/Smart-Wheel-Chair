@@ -57,3 +57,26 @@ def make_geometric(obstacles: tuple[Obstacle, ...] = (), config: SimulationConfi
     controller = RobotController(sim, sensor, config, EventLog(clock=fixed_clock))
     controller.observe()
     return controller
+
+
+class FakeSerial:
+    """Hands out queued chunks. Writing is a test failure."""
+
+    def __init__(self, *chunks: bytes) -> None:
+        self.chunks = list(chunks)
+        self.closed = False
+        self.fail_with: Exception | None = None
+
+    def read_available(self) -> bytes:
+        if self.fail_with:
+            raise self.fail_with
+        return self.chunks.pop(0) if self.chunks else b""
+
+    def push(self, *chunks: bytes) -> None:
+        self.chunks.extend(chunks)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def write(self, data) -> None:  # pragma: no cover - must never run
+        raise AssertionError("telemetry must never write to the device")

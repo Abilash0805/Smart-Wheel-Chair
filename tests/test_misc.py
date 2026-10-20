@@ -76,11 +76,53 @@ def _imports(path: Path) -> set[str]:
     return names
 
 
+HARDWARE_PACKAGE = ROOT / "src" / "hardware"
+DEVICE_WRITE_CALLS = {"write", "writelines", "send", "sendall", "send_break"}
+
+
+def _module_level_imports(path: Path) -> set[str]:
+    """Imports that run when the module is imported (anything not inside a function)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+
+    def visit(node: ast.AST) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            return
+        if isinstance(node, ast.Import):
+            names.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            names.add(node.module.split(".")[0])
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    visit(tree)
+    return names
+
+
 def test_no_hardware_libraries_are_imported():
+    # Unchanged strict rule for everything outside src/hardware/.
     files = [ROOT / "app.py", *ROOT.joinpath("src").rglob("*.py")]
     for path in files:
+        if HARDWARE_PACKAGE in path.parents:
+            continue
         bad = _imports(path) & HARDWARE_MODULES
         assert not bad, f"{path.name} imports hardware modules {bad}"
+
+
+def test_hardware_package_only_imports_serial_lazily_and_never_gpio():
+    files = list(HARDWARE_PACKAGE.rglob("*.py"))
+    assert files, "src/hardware should exist"
+    for path in files:
+        assert not (_imports(path) & (HARDWARE_MODULES - {"serial"})), f"{path.name} imports GPIO/bus libraries"
+        assert not (_module_level_imports(path) & HARDWARE_MODULES), f"{path.name} imports hardware at module level"
+
+
+def test_no_code_writes_to_a_device():
+    files = [ROOT / "app.py", ROOT / "src" / "telemetry.py", *HARDWARE_PACKAGE.rglob("*.py")]
+    for path in files:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                assert node.func.attr not in DEVICE_WRITE_CALLS, f"{path.name} calls .{node.func.attr}()"
 
 
 def test_core_does_not_depend_on_streamlit():

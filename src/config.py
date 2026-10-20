@@ -149,6 +149,33 @@ class NavigationConfig:
 
 
 @dataclass(frozen=True)
+class TelemetryConfig:
+    """Read-only hardware telemetry (host side). No electrical values live here."""
+
+    # Must match whatever the device firmware uses. A software setting, not a wiring fact.
+    baud_rate: int = 115200
+    # No valid message for this long -> data is STALE and is not shown as a reading.
+    stale_after_s: float = 1.0
+    # Reconnect back-off after the serial link drops: doubles from initial up to max.
+    reconnect_initial_s: float = 0.5
+    reconnect_max_s: float = 5.0
+    # Longest accepted line (bytes, excluding the newline). Longer input is discarded.
+    max_line_bytes: int = 512
+
+    def __post_init__(self) -> None:
+        if isinstance(self.baud_rate, bool) or not isinstance(self.baud_rate, int) or self.baud_rate <= 0:
+            raise ValueError("baud_rate must be a positive integer")
+        for name in ("stale_after_s", "reconnect_initial_s", "reconnect_max_s"):
+            _require_finite(getattr(self, name), name)
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be > 0")
+        if self.reconnect_max_s < self.reconnect_initial_s:
+            raise ValueError("reconnect_max_s must be >= reconnect_initial_s")
+        if self.max_line_bytes < 64:
+            raise ValueError("max_line_bytes must be at least 64")
+
+
+@dataclass(frozen=True)
 class SimulationConfig:
     """All configuration in one place, with cross-field validation."""
 

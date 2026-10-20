@@ -8,12 +8,21 @@ a live dashboard, and some sensing experiments.
 > Everything in this repository is currently **simulation only**. Simulated results
 > do not prove real-world safety.
 
-## Current stage: Stage 1 simulation ✅ + simulated navigation (Stage 4 work, simulation only) ✅
+## Current stage: simulation ✅ + simulated navigation ✅ + read-only hardware telemetry (software side) ✅
 
 A deterministic 2-D simulator, a simulated HC-SR04-style ultrasonic sensor, a safety
 state machine, A* route planning on an occupancy grid, a Streamlit dashboard, and automated
-tests. **There is no hardware integration of any kind** (a test fails if GPIO/serial
-libraries are imported).
+tests.
+
+The dashboard has two modes:
+- **Simulation** (default).
+- **Hardware telemetry (read-only)**: it can *display* validated sensor messages from a serial
+  port.
+
+There is **no motor control and no GPIO code**. Nothing is sent to any device. The serial library
+is loaded only when you press Connect in hardware mode. **No physical hardware has been connected
+or tested yet**: hardware mode has only been tested against fake streams and pyserial's virtual
+`loop://` port.
 
 Navigation was done in simulation before hardware validation (Stage 2) on purpose. It needs
 no hardware and doesn't change the safety rules. Stage 2 is still blocked on hardware
@@ -40,6 +49,11 @@ Dependencies are deliberately minimal: **streamlit** (dashboard) and **pytest** 
 Everything else is the Python standard library. Streamlit brings its own dependencies
 (e.g. pandas). No API keys, accounts or internet services are used at runtime.
 
+**Optional, only for reading a real serial port:** `pyserial`. The simulator and tests work without it.
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-hardware.txt
+```
+
 ## Run
 
 | What | Command (PowerShell, from the project folder) |
@@ -48,10 +62,17 @@ Everything else is the Python standard library. Streamlit brings its own depende
 | All tests | `.\.venv\Scripts\python.exe -m pytest -q` |
 | Navigation tests only | `.\.venv\Scripts\python.exe -m pytest -q tests/test_navigation.py` |
 | Headless check (no browser) | `.\.venv\Scripts\python.exe headless_demo.py` |
+| Telemetry tests only | `.\.venv\Scripts\python.exe -m pytest -q tests/test_telemetry.py` |
 
 To stop the dashboard, press `Ctrl+C` in the terminal.
 
-## Dashboard controls
+## Dashboard modes
+Pick the mode at the top of the sidebar:
+- **Simulation** (default): everything below. Every value is labelled SIMULATED.
+- **Hardware telemetry (read-only)**: a separate page. It has no room map, no simulated values,
+  and no Start/Stop/motion buttons. See [Hardware telemetry](#hardware-telemetry-read-only).
+
+## Dashboard controls (Simulation mode)
 
 | Control | What it does |
 |---|---|
@@ -97,6 +118,8 @@ src/
   sensors/base.py           DistanceSensor interface (future real sensors implement this)
   sensors/simulated_ultrasonic.py   Ray-cast HC-SR04-style sensor + fault injection
   safety.py                 CLEAR / OBSTACLE / INVALID decision for one reading
+  telemetry.py              Telemetry schema + validation, simulation & serial providers (read-only)
+  hardware/serial_port.py   Lazy pyserial adapter, opened only on Connect, no write method
   controller.py             State machine + interlocks (the ONLY place state changes)
   event_log.py              Bounded, timestamped log with CSV export
   navigation.py             Occupancy grid, A* planner, route follower (requests motion only)
@@ -104,6 +127,8 @@ src/
   visualization.py          Pure SVG renderer of the room
 tests/                      pytest tests (fake sensors via dependency injection)
 docs/STATE_MACHINE.md       Every permitted state transition
+docs/TELEMETRY_PROTOCOL.md  Telemetry message format and how bad/stale data is handled
+requirements-hardware.txt   Optional pyserial (only for a real serial port)
 ```
 
 Key decisions:
@@ -150,6 +175,46 @@ error is over 20°, then drives at up to the speed-slider value. It only **reque
 - If obstacles change, the route is re-planned from the current position. If no route remains,
   the robot stops.
 
+## Hardware telemetry (read-only)
+
+Message format: **[docs/TELEMETRY_PROTOCOL.md](docs/TELEMETRY_PROTOCOL.md)**. One JSON object per
+line, versioned (`"v": 1`), with sequence number, distance in metres, validity, device-reported
+status and link health. Every message is validated, and a distance is shown **only** when a fresh
+(≤ 1 s), valid message passes the host's range check. Stale, missing, malformed or disconnected
+data is never shown as a reading.
+
+How it's built:
+- `src/telemetry.py`: the schema and parser, plus two providers (`SimulationTelemetryProvider`,
+  `SerialTelemetryProvider`) that produce the same `TelemetrySnapshot`.
+  - The serial reader is polled (no background threads) and reads from an injected stream, so
+    tests use fake streams.
+  - It handles split and over-long lines, rejects bad messages, detects stale data, and
+    reconnects with back-off after an unplug.
+- `src/hardware/serial_port.py`: the **only** file allowed to import pyserial, and only inside a
+  function that runs when you press Connect. Its stream wrapper has no write method.
+- Tests enforce these rules:
+  - No GPIO or serial imports anywhere else.
+  - No module-level pyserial import.
+  - No `.write()`/`.send()` calls in the telemetry code or the dashboard.
+  - Starting the app, even in hardware mode, doesn't load `serial` (checked in a subprocess).
+
+### Windows: development and testing
+1. **No hardware needed for tests:** `.\.venv\Scripts\python.exe -m pytest -q`. Without pyserial,
+   2 adapter tests are skipped. Install `requirements-hardware.txt` to run them too; they use
+   pyserial's virtual `loop://` port, not a device.
+2. **Try the hardware page without hardware:** start the dashboard, choose *Hardware telemetry*,
+   enter `loop://` as the port and press Connect. You should see "PORT OPEN - WAITING FOR VALID
+   DATA" and no distance (nothing sends data on a loopback). A made-up name like `COM99` should show
+   "CONNECTION ERROR".
+3. **Finding a real port later:** Device Manager → *Ports (COM & LPT)*, or the *List serial ports*
+   button. Close the Arduino IDE's Serial Monitor first, because only one program can open a COM
+   port at a time.
+4. Opening an Arduino Uno's USB serial port normally **resets the board**. That's expected; the
+   dashboard logs "sequence restarted".
+
+Before plugging anything in, the electrical checks in the next milestone still apply. Reading
+telemetry over USB doesn't need the motors, the L298N or the battery to be connected.
+
 ## Known limitations (be honest at the expo!)
 - All numbers are simulation defaults. The HC-SR04 range (2 cm–4 m) and 15° beam are *commonly
   published nominal values*, not measured on our module. The robot radius (0.15 m) is a placeholder.
@@ -178,10 +243,17 @@ error is over 20°, then drives at up to the speed-slider value. It only **reque
     the obstacle, Resume stays blocked until the scenario is reset.
   - The four destinations are named demo positions. They aren't text or voice commands yet (Stage 6).
 - The software e-stop isn't a physical safety device. Real tests need an independent hardware cut-off.
+- **Telemetry limits:**
+  - No device firmware exists yet, so hardware mode has never received real data.
+  - The device-reported `status` is only displayed, never verified or acted on.
+  - Freshness uses the time each message *arrives* at the PC, so a device sending old buffered
+    readings would look fresh. The sequence number only detects gaps and repeats.
+  - There's no checksum: corrupted bytes that still form valid JSON would be accepted.
+  - Hardware mode is display-only; it doesn't feed the safety state machine.
 
 ## Project status
 
-**Completed (verified by tests, 339 passing at the time of writing):**
+**Completed (verified by tests, 423 passing at the time of writing with pyserial installed; 421 + 2 skipped without it):**
 - [x] Project structure, config validation, deterministic simulator (motion, ray casting, collisions)
 - [x] Simulated ultrasonic sensor with range limits, seeded noise, 6 fault-injection modes
 - [x] Safety assessment: threshold boundary, every invalid-value class
@@ -192,9 +264,12 @@ error is over 20°, then drives at up to the speed-slider value. It only **reque
 - [x] Simulated navigation: occupancy grid with inflation, A* with invalid/unreachable handling,
       route following through the controller, re-planning on obstacle changes, dashboard route display,
       predefined and custom goals (tests in `tests/test_navigation.py` and `tests/test_dashboard.py`)
+- [x] Read-only telemetry: versioned schema, validation, staleness, disconnect/reconnect, Simulation vs
+      Hardware dashboard modes (tests with fake streams in `tests/test_telemetry.py`, `tests/test_dashboard.py`).
+      **Not yet tested with real hardware.**
 
-**Not started (later stages):** hardware validation (Stage 2), hardware sensor/motor backends
-(Stage 3), real-world localisation for navigation (Stage 4, hardware part), ESP32 CSI research
+**Not started (later stages):** hardware validation (Stage 2), device firmware that sends telemetry,
+motor backends (Stage 3), real-world localisation for navigation (Stage 4, hardware part), ESP32 CSI research
 (Stage 5), text/voice destination commands (Stage 6).
 
 **Blocked:** Stage 2 needs real hardware information from you (see below).

@@ -1,4 +1,4 @@
-"""MobilityBot Stage 1 dashboard (simulation only).
+"""MobilityBot dashboard: Simulation mode and read-only Hardware Telemetry mode.
 
 Run with:  streamlit run app.py
 
@@ -8,6 +8,9 @@ Safety rules for this file:
 * All robot state lives in one RobotController stored in st.session_state.
   This file only displays it and forwards user actions.
 * Auto-run only calls tick(), which can never start movement.
+* Hardware Telemetry mode is opt-in and READ-ONLY: it displays validated
+  messages from a serial port and sends nothing. The serial library is only
+  loaded when the user presses Connect. Simulated values never appear there.
 """
 
 from __future__ import annotations
@@ -17,7 +20,7 @@ import time
 import pandas as pd
 import streamlit as st
 
-from src.config import SimulationConfig
+from src.config import SimulationConfig, TelemetryConfig
 from src.controller import RobotController
 from src.event_log import Level
 from src.models import (
@@ -29,8 +32,10 @@ from src.models import (
     SensorFaultMode,
     Verdict,
 )
+from src.hardware.serial_port import SerialUnavailableError, list_serial_ports, make_serial_opener
 from src.navigation import RouteStatus
 from src.scenarios import DEFAULT_SCENARIO, DESTINATIONS, SCENARIOS, build_controller
+from src.telemetry import ConnectionState, SensorValidity, SerialTelemetryProvider, SimulationTelemetryProvider
 from src.visualization import render_room_svg
 
 AUTO_RUN_INTERVAL_S = 0.5
@@ -46,6 +51,26 @@ LEVEL_LABEL = {Level.INFO: "ℹ INFO", Level.WARNING: "⚠ WARNING", Level.CRITI
 OBSTACLE_COLUMNS = ["name", "x", "y", "width", "height"]
 CUSTOM_GOAL = "Custom goal"
 
+MODE_SIMULATION = "Simulation"
+MODE_HARDWARE = "Hardware telemetry (read-only)"
+HARDWARE_REFRESH_S = 0.5
+BAUD_RATES = [9600, 19200, 38400, 57600, 115200]
+CONNECTION_LABEL = {
+    ConnectionState.DISCONNECTED: "○ NOT CONNECTED",
+    ConnectionState.ERROR: "✖ CONNECTION ERROR",
+    ConnectionState.WAITING_FOR_DATA: "… PORT OPEN - WAITING FOR VALID DATA",
+    ConnectionState.CONNECTED: "✔ RECEIVING VALID TELEMETRY",
+    ConnectionState.STALE: "⚠ DATA STALE - NOT TRUSTED",
+    ConnectionState.RECONNECTING: "↻ LINK LOST - RECONNECTING",
+    ConnectionState.SIMULATED: "🧪 SIMULATED - no hardware",
+}
+VALIDITY_LABEL = {
+    SensorValidity.VALID: "✔ VALID",
+    SensorValidity.INVALID: "✖ INVALID",
+    SensorValidity.STALE: "⚠ STALE - not trusted",
+    SensorValidity.NO_DATA: "— NO DATA",
+}
+
 ss = st.session_state
 
 
@@ -59,6 +84,7 @@ def load_scenario(key: str) -> None:
     """Build a fresh simulation and put every setting back to its default."""
     defaults = SimulationConfig()
     ss.controller = build_controller(key)
+    ss.scenario_key = key  # plain (non-widget) key, so it survives mode switches
     ss.scenario_select = key
     ss.threshold = defaults.safety.stop_threshold_m
     ss.speed = defaults.motion.speed_mps
@@ -72,6 +98,33 @@ def load_scenario(key: str) -> None:
     ss.obstacle_base = obstacles_to_df(ss.controller.sim.world.obstacles)
     ss.editor_version = ss.get("editor_version", 0) + 1
     ss.flash = ("info", f"Loaded scenario: {SCENARIOS[key].title}. Robot is IDLE.")
+
+
+def sync_simulation_widgets() -> None:
+    """Restore simulation widget values that Streamlit dropped while they were not drawn.
+
+    Streamlit forgets a widget's value on runs where the widget is not shown
+    (e.g. while in Hardware mode). Without this, sliders would come back at their
+    minimum while the controller still used the real values. The controller is
+    the source of truth, so missing values are taken from it.
+    """
+    c = ctrl()
+    restore = {
+        "scenario_select": ss.scenario_key,
+        "threshold": c.stop_threshold_m,
+        "speed": c.speed_mps,
+        "turn_rate": c.turn_rate_dps,
+        "noise_cm": getattr(getattr(c.sensor, "config", None), "noise_std_m", 0.0) * 100,
+        "fault_mode": getattr(c.sensor, "fault_mode", SensorFaultMode.NONE).value,
+        "auto_run": False,
+        "destination": next(iter(DESTINATIONS)),
+        "custom_x": 2.0,
+        "custom_y": 1.0,
+        "show_grid": True,
+    }
+    for key, value in restore.items():
+        if key not in ss:
+            ss[key] = value
 
 
 def obstacles_to_df(obstacles: tuple[Obstacle, ...]) -> pd.DataFrame:
@@ -159,6 +212,46 @@ def on_clear_route() -> None:
         ss.flash = ("info", "Route cleared. Start now drives straight using the speed and turn sliders.")
     except ValueError as exc:
         ss.flash = ("warning", f"Route not cleared: {exc}")
+
+
+def on_mode_change() -> None:
+    # Leaving hardware mode always closes the port; nothing keeps reading in the background.
+    if ss.mode != MODE_HARDWARE and ss.get("hw_provider") is not None:
+        ss.hw_provider.disconnect()
+        ss.hw_provider = None
+
+
+def on_list_ports() -> None:
+    try:
+        ports = list_serial_ports()
+    except SerialUnavailableError as exc:
+        ss.hw_flash = ("warning", str(exc))
+        return
+    ss.hw_flash = ("info", "Ports found: " + (", ".join(f"{d} ({desc})" for d, desc in ports) or "none"))
+
+
+def on_connect() -> None:
+    if ss.get("hw_provider") is not None:
+        ss.hw_provider.disconnect()
+        ss.hw_provider = None
+    factory = ss.get("serial_opener_factory") or make_serial_opener  # tests inject a fake here
+    port, baud = str(ss.get("hw_port", "")), int(ss.get("hw_baud", TelemetryConfig().baud_rate))
+    try:
+        opener = factory(port, baud)
+    except ValueError as exc:
+        ss.hw_flash = ("warning", str(exc))
+        return
+    provider = SerialTelemetryProvider(opener, TelemetryConfig(baud_rate=baud), SimulationConfig().sensor,
+                                       port.strip())
+    provider.connect()
+    ss.hw_provider = provider
+    ss.hw_flash = ("info", f"Connect requested for {port.strip()} (read-only). See the connection status below.")
+
+
+def on_disconnect() -> None:
+    if ss.get("hw_provider") is not None:
+        ss.hw_provider.disconnect()
+    ss.hw_flash = ("info", "Disconnected. The port is closed.")
 
 
 # ------------------------------------------------------------------- layout
@@ -261,6 +354,8 @@ def render_controls(c: RobotController) -> None:
 
 def render_sensor_panel(c: RobotController) -> None:
     st.subheader("Sensor (SIMULATED)")
+    snap = SimulationTelemetryProvider(lambda: c).snapshot()
+    st.caption(f"Data source: **{snap.source}** · {CONNECTION_LABEL[snap.connection]}")
     a, r = c.last_assessment, c.last_reading
     value = f"{a.distance_m:.2f} m" if a and a.distance_m is not None else "—"
     st.metric("Forward distance", value, help="Nearest surface inside the simulated ultrasonic beam")
@@ -397,10 +492,109 @@ def render_obstacle_editor() -> None:
             st.error(f"Obstacle change NOT applied: {exc}", icon="✖️")
 
 
+def render_hardware_header() -> None:
+    st.title("🤖 MobilityBot - Hardware Telemetry")
+    st.warning(
+        "**🔌 HARDWARE TELEMETRY MODE - READ-ONLY.** This page only shows validated messages received "
+        "from the device over a serial port. It sends nothing to the device and has **no motor controls**. "
+        "Simulated values are never shown here. A reading is only displayed when a fresh, valid message "
+        "has actually been received.",
+        icon="⚠️",
+    )
+
+
+def render_hardware_sidebar() -> None:
+    sb = st.sidebar
+    if "hw_baud" not in ss:
+        ss.hw_baud = TelemetryConfig().baud_rate  # otherwise the selectbox would default to its first entry
+    sb.header("Serial connection (read-only)")
+    sb.text_input("Serial port", key="hw_port", placeholder="e.g. COM3 (Windows) or /dev/ttyACM0",
+                  help="Find it in Windows Device Manager → Ports (COM & LPT), or press List serial ports.")
+    sb.selectbox("Baud rate", BAUD_RATES, key="hw_baud",
+                 help="Must match the device firmware. This is a software setting, not a wiring value.")
+    sb.button("🔍 List serial ports", on_click=on_list_ports, width="stretch",
+              help="Lists ports only; opens nothing. Needs the optional pyserial package.")
+    connect_col, disconnect_col = sb.columns(2)
+    connect_col.button("🔌 Connect", on_click=on_connect, width="stretch",
+                       help="Opens the port for READING only. Opening an Arduino Uno's port normally resets the board.")
+    disconnect_col.button("⏏ Disconnect", on_click=on_disconnect, width="stretch")
+    sb.caption("Telemetry is read-only: no commands are ever sent to the device.")
+
+
+def hardware_panel() -> None:
+    provider: SerialTelemetryProvider | None = ss.get("hw_provider")
+    flash = ss.get("hw_flash")
+    if flash:
+        {"info": st.info, "warning": st.warning}[flash[0]](flash[1])
+    if provider is None:
+        st.info("○ NOT CONNECTED. No hardware data. Enter the serial port in the sidebar and press Connect.",
+                icon="ℹ️")
+        return
+    provider.poll()
+    snap = provider.snapshot()
+
+    label = CONNECTION_LABEL[snap.connection]
+    detail = f"**Port:** {provider.port_label} · **Source:** {snap.source}"
+    if snap.connection is ConnectionState.CONNECTED:
+        st.success(f"### {label}\n{detail}", icon="✅")
+    elif snap.connection in (ConnectionState.STALE, ConnectionState.WAITING_FOR_DATA):
+        st.warning(f"### {label}\n{detail}", icon="⚠️")
+    elif snap.connection in (ConnectionState.ERROR, ConnectionState.RECONNECTING):
+        st.error(f"### {label}\n{detail}\n\n**Problem:** {snap.last_error or 'unknown'}", icon="✖️")
+    else:
+        st.info(f"### {label}\n{detail}", icon="ℹ️")
+    if snap.connection is ConnectionState.STALE:
+        st.warning(f"⚠ STALE DATA: no valid message for {snap.last_message_age_s:.1f} s. "
+                   "The last reading is NOT shown and must not be trusted.")
+
+    cols = st.columns(4)
+    cols[0].metric("Distance (HARDWARE)", f"{snap.distance_m:.3f} m" if snap.distance_m is not None else "—",
+                   help="Shown only for a fresh message that the device marks valid and the host range check accepts.")
+    cols[1].metric("Sensor validity", VALIDITY_LABEL[snap.sensor_validity])
+    cols[2].metric("Last valid message",
+                   f"{snap.last_message_age_s:.1f} s ago" if snap.last_message_age_s is not None else "never")
+    cols[3].metric("Sequence #", snap.seq if snap.seq is not None else "—")
+    st.caption(f"Why: {snap.validity_reason}")
+    if snap.last_message_wall is not None:
+        st.caption(f"Last valid message received at {snap.last_message_wall.strftime('%H:%M:%S')} (host clock).")
+
+    st.markdown(
+        f"**Device-reported controller status:** `{snap.reported_status or '—'}` "
+        "_(as reported by the device; not verified by this dashboard)_  \n"
+        f"**Device-reported link health:** `{snap.device_link or '—'}`"
+    )
+    counts = st.columns(4)
+    counts[0].metric("Messages accepted", snap.messages_ok)
+    counts[1].metric("Messages rejected", snap.messages_rejected)
+    counts[2].metric("Messages missed (seq gaps)", snap.messages_missed)
+    counts[3].metric("Reconnects", snap.reconnects)
+    if snap.last_error and snap.connection not in (ConnectionState.ERROR, ConnectionState.RECONNECTING):
+        st.caption(f"Last problem: {snap.last_error}")
+
+    st.subheader("Telemetry event log")
+    rows = [{"#": e.seq, "Time": e.wall_time.strftime("%H:%M:%S"), "Level": LEVEL_LABEL[e.level],
+             "Message": e.message} for e in provider.log.latest(LOG_ROWS)]
+    st.dataframe(pd.DataFrame(rows, columns=["#", "Time", "Level", "Message"]), hide_index=True,
+                 height=260, width="stretch")
+
+
 def main() -> None:
-    st.set_page_config(page_title="MobilityBot Simulator", page_icon="🤖", layout="wide")
+    st.set_page_config(page_title="MobilityBot", page_icon="🤖", layout="wide")
     if "controller" not in ss:
         load_scenario(DEFAULT_SCENARIO)
+    st.sidebar.radio("Dashboard mode", [MODE_SIMULATION, MODE_HARDWARE], key="mode", on_change=on_mode_change,
+                     help="Simulation is the default. Hardware telemetry is read-only and opens nothing "
+                          "until you press Connect.")
+    if ss.mode == MODE_HARDWARE:
+        render_hardware_header()
+        render_hardware_sidebar()
+        provider = ss.get("hw_provider")
+        live = provider is not None and provider.is_active
+        st.fragment(hardware_panel, run_every=HARDWARE_REFRESH_S if live else None)()
+        st.caption("Unoccupied experimental prototype: never place a person on the robot.")
+        return
+
+    sync_simulation_widgets()
     render_header()
     render_sidebar()
     live_area = st.container()
